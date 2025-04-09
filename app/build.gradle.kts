@@ -50,4 +50,3 @@ dependencies {
     implementation 'com.google.firebase:firebase-database-ktx'
     implementation 'com.google.android.gms:play-services-auth:21.1.1'
     }
-}
