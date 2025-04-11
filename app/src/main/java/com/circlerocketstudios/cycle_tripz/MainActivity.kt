@@ -1,114 +1,111 @@
-// Add these properties
-private val database = Firebase.database.reference
-private lateinit var currentGroupRef: DatabaseReference
-private var currentGroupId: String? = null
+class MainActivity : AppCompatActivity() {
+    private lateinit var binding: ActivityMainBinding
+    private lateinit var locationClient: FusedLocationProviderClient
+    private var isTracking = false
+    private var currentGroupId: String? = null
 
-// Add to onCreate after binding
-setupGroupUI()
-checkGroupMembership()
+    // Firebase
+    private val auth: FirebaseAuth by lazy { Firebase.auth }
+    private val database: FirebaseDatabase by lazy { Firebase.database }
+    private var groupListener: ValueEventListener? = null
 
-private fun setupGroupUI() {
-    binding.btnCreateGroup.setOnClickListener { createGroup() }
-    binding.btnJoinGroup.setOnClickListener { joinGroup() }
-    binding.btnLeaveGroup.setOnClickListener { leaveGroup() }
-}
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        locationClient = LocationServices.getFusedLocationProviderClient(this)
 
-private fun checkGroupMembership() {
-    database.child("users").child(auth.uid!!).child("groupId")
-        .addListenerForSingleValueEvent(object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                currentGroupId = snapshot.getValue(String::class.java)
-                currentGroupId?.let { setupGroupListener(it) }
-                updateGroupUI()
-            }
-            override fun onCancelled(error: DatabaseError) {
-                Log.e("Group", "Error checking group membership", error.toException())
-            }
-        })
-}
+        setupUI()
+        checkPermissions()
+    }
 
-private fun createGroup() {
-    val groupId = database.child("groups").push().key!!
-    val group = Group(
-        groupId = groupId,
-        name = "Group ${Random.nextInt(1000,9999)}",
-        members = mapOf(auth.uid!! to true)
-    )
+    private fun setupUI() {
+        binding.btnToggleTracking.setOnClickListener { toggleTracking() }
+        binding.btnCreateGroup.setOnClickListener { createGroup() }
+        binding.btnJoinGroup.setOnClickListener { showJoinDialog() }
+        binding.btnLeaveGroup.setOnClickListener { leaveGroup() }
+        updateUIState()
+    }
 
-    database.child("groups").child(groupId).setValue(group)
-        .addOnSuccessListener {
-            database.child("users").child(auth.uid!!).child("groupId").setValue(groupId)
-            setupGroupListener(groupId)
+    private fun toggleTracking() {
+        isTracking = if (!isTracking) {
+            startLocationUpdates()
+            true
+        } else {
+            stopLocationUpdates()
+            false
         }
-        .addOnFailureListener { e ->
-            Log.e("Group", "Error creating group", e)
-        }
-}
+        updateUIState()
+    }
 
-private fun joinGroup() {
-    val dialog = MaterialAlertDialogBuilder(this).apply {
-        setTitle("Join Group")
-        setView(R.layout.dialog_join_group)
-        setPositiveButton("Join") { _, _ ->
-            val code = findViewById<EditText>(R.id.etGroupCode).text.toString()
-            joinGroupWithCode(code)
-        }
-    }.show()
-}
-
-private fun joinGroupWithCode(groupId: String) {
-    database.child("groups").child(groupId).child("members")
-        .runTransaction(object : Transaction.Handler {
-            override fun doTransaction(currentData: MutableData): Transaction.Result {
-                if (currentData.value == null) return Transaction.abort()
-                val members = currentData.getValue(object : GenericTypeIndicator<Map<String, Boolean>>() {}) ?: return Transaction.abort()
-                if (members.size >= 10) return Transaction.abort() // Max group size
-                currentData.value = members + (auth.uid!! to true)
-                return Transaction.success(currentData)
+    private fun startLocationUpdates() {
+        if (checkSelfPermission(ACCESS_FINE_LOCATION) == PERMISSION_GRANTED) {
+            val request = LocationRequest.create().apply {
+                interval = 3000
+                fastestInterval = 1500
+                priority = Priority.PRIORITY_HIGH_ACCURACY
             }
 
-            override fun onComplete(error: DatabaseError?, committed: Boolean, currentData: DataSnapshot?) {
-                if (committed) {
-                    database.child("users").child(auth.uid!!).child("groupId").setValue(groupId)
-                    setupGroupListener(groupId)
-                }
-            }
-        })
-}
+            locationClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
+            startService(Intent(this, LocationService::class.java))
+        }
+    }
 
-private fun setupGroupListener(groupId: String) {
-    currentGroupRef = database.child("groups").child(groupId)
-    currentGroupRef.addValueEventListener(object : ValueEventListener {
-        override fun onDataChange(snapshot: DataSnapshot) {
-            val group = snapshot.getValue(Group::class.java)
-            group?.let {
-                binding.tvGroupSpeed.text = "Group Speed: ${it.totalSpeed.roundToInt()} mph"
+    private val locationCallback = object : LocationCallback() {
+        override fun onLocationResult(result: LocationResult) {
+            result.lastLocation?.let { location ->
+                val speedMph = (location.speed * 2.23694).roundToInt()
+                binding.tvSpeed.text = getString(R.string.speed_format, speedMph)
+                updateGroupSpeed(speedMph.toDouble())
             }
         }
-        override fun onCancelled(error: DatabaseError) {
-            Log.e("Group", "Group listener cancelled", error.toException())
+    }
+
+    private fun updateGroupSpeed(speed: Double) {
+        currentGroupId?.let { groupId ->
+            database.getReference("groups/$groupId/members/${auth.uid}")
+                .setValue(speed)
         }
-    })
-}
+    }
 
-private fun updateSpeedInGroup(speed: Double) {
-    currentGroupId?.let { groupId ->
-        // Update user's speed
-        database.child("users").child(auth.uid!!).child("currentSpeed").setValue(speed)
+    // Group Management
+    private fun createGroup() {
+        val groupId = database.reference.child("groups").push().key!!
+        val group = mapOf(
+            "name" to "Group ${Random.nextInt(1000, 9999)}",
+            "owner" to auth.uid,
+            "createdAt" to ServerValue.TIMESTAMP
+        )
 
-        // Update group total speed
-        database.child("groups").child(groupId).child("totalSpeed")
-            .runTransaction(object : Transaction.Handler {
-                override fun doTransaction(currentData: MutableData): Transaction.Result {
-                    val currentSpeed = currentData.getValue(Double::class.java) ?: 0.0
-                    currentData.value = currentSpeed + speed
-                    return Transaction.success(currentData)
-                }
-                override fun onComplete(error: DatabaseError?, committed: Boolean, currentData: DataSnapshot?) {
-                    if (!committed) {
-                        Log.e("Group", "Failed to update group speed")
+        database.reference.child("groups/$groupId").setValue(group)
+            .addOnSuccessListener {
+                currentGroupId = groupId
+                setupGroupListener()
+                updateUIState()
+            }
+    }
+
+    private fun setupGroupListener() {
+        currentGroupId?.let { groupId ->
+            groupListener = database.getReference("groups/$groupId/members")
+                .addValueEventListener(object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        val totalSpeed = snapshot.children.sumOf { it.getValue(Double::class.java) ?: 0.0 }
+                        binding.tvGroupSpeed.text = getString(R.string.group_speed_format, totalSpeed.roundToInt())
                     }
-                }
-            })
+
+                    override fun onCancelled(error: DatabaseError) {
+                        showError("Group update failed: ${error.message}")
+                    }
+                })
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        groupListener?.let { currentGroupId?.let { id ->
+            database.getReference("groups/$id").removeEventListener(it)
+        }}
+        stopLocationUpdates()
     }
 }
