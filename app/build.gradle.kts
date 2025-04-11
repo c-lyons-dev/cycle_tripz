@@ -37,6 +37,8 @@ android {
 
 dependencies {
 
+
+    classpath 'com.google.gms:google-services:4.4.2'
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
